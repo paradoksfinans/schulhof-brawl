@@ -1456,7 +1456,7 @@ class Fighter {
   dodge(dx, dy) {
     const inRec = this.st === 'atk' && this.ph === 're';
     if (!(this.st === 'idle' || inRec)) return false;
-    const cost = inRec ? 40 : 25;
+    const cost = inRec ? 40 : (this.dodgeCost || 25);
     if (this.sta < cost) { if (this.isP) Fight.flashSta = 20; return false; }
     this.sta -= cost;
     let l = Math.hypot(dx, dy);
@@ -1519,6 +1519,7 @@ class Fighter {
       case 'hurt': if (--this.hurtT <= 0) this.st = this.dizzyT > 0 ? 'dizzy' : 'idle'; break;
       case 'dizzy': if (--this.dizzyT <= 0) this.st = 'idle'; if (t % 50 === 0) sfx.dizzy(); break;
       case 'frozen': if (--this.frozenT <= 0) this.st = 'idle'; break;
+      case 'block': this.ang += normA(ta - this.ang) * 0.3; if (--this.blockT <= 0) this.st = 'idle'; break;
     }
     // physics
     const fr = this.st === 'dodge' ? 0.86 : (this.missT > 0 ? 0.72 : 0.8);
@@ -1547,6 +1548,7 @@ class Fighter {
   }
   pose() {
     switch (this.st) {
+      case 'block': return ['dodge', 0];
       case 'down': return ['hurt', 0];
       case 'win': return ['victory', (this.winT >> 4) & 1];
       case 'frozen': return ['calm', 0];
@@ -1740,10 +1742,11 @@ const Fight = {
       return;
     }
     if (b.inv > 0) return;
+    if (b.st === 'block' && this.blockCheck && this.blockCheck(a, b, mv, d)) return;
     this.landHit(a, b, mv, d);
   },
   perfect(b, a) {
-    b.pow = Math.min(100, b.pow + 25);
+    b.pow = Math.min(100, b.pow + (b.isP && this.hasSk && this.hasSk('powerplus') ? 35 : 25));
     if (b.isP) {
       this.stats.perfects++; questProg('perfect3', 1);
       this.slowT = 40; this.banner('PERFEKT!', '#7ae8ff', 50, 20); sfx.perfect(); buzz(15); crowdReact(0.6);
@@ -1754,8 +1757,9 @@ const Fight = {
   landHit(a, b, mv, d) {
     const counter = b.st === 'atk' && (b.ph === 'su' || b.ph === 're');
     a.combo = a.comboT > 0 ? a.combo + 1 : 1; a.comboT = 80; a.comboPop = 10;
-    let dmg = mv.dmg * a.dmgM * (1 + Math.min(a.combo - 1, 6) * 0.06) * (counter ? 1.35 : 1);
+    let dmg = mv.dmg * a.dmgM * (1 + Math.min(a.combo - 1, 6) * 0.06) * (counter ? (a.isP && this.hasSk && this.hasSk('konterhaken') ? 1.7 : 1.35) : 1);
     let crit = false;
+    if (this.dmgMods) dmg *= this.dmgMods(a, b, mv);
     if (a.isP && a.chili) { dmg *= 2; a.chili = false; crit = true; }
     if (b.armorT > 0) dmg *= 0.5;
     if (!a.isP) dmg *= DIFF_MULT[save.settings.diff];
@@ -1763,14 +1767,16 @@ const Fight = {
     dmg = Math.max(1, Math.round(dmg));
     a.hitDone = true;
     b.hp = Math.max(0, b.hp - dmg);
+    if (b.isP && b.hp <= 0 && this.hasSk && this.hasSk('zweite') && !this.usedSecond && !this.tut) { this.usedSecond = true; b.hp = 1; this.banner('STEHAUFMÄNNCHEN!', '#5be36a', 50, 15); }
     if (b.isP) this.stats.dmgTaken += dmg;
+    if (a.isP) { this.stats.dmgDealt = (this.stats.dmgDealt || 0) + dmg; if (mv.kind === 'kick' && this.hasSk && this.hasSk('doppelkick') && b.hp > 0) (this.delayed = this.delayed || []).push({ t: 9, a, b, dmg: Math.max(1, Math.round(dmg * 0.5)) }); }
     // state
     const wasAtk = b.st === 'atk';
     b.st = 'hurt'; b.mv = null; b.hurtT = mv.kind === 'special' ? 26 : mv.kind === 'kick' ? 16 : 12; b.inv = 8;
     const kx = (b.x - a.x) / (d || 1), ky = (b.y - a.y) / (d || 1);
     const kb = mv.kb * b.kbRes * (b.hp <= 0 ? 1.8 : 1);
     b.vx += kx * kb; b.vy += ky * kb;
-    a.pow = Math.min(100, a.pow + mv.pow + (counter ? 8 : 0)); b.pow = Math.min(100, b.pow + 5);
+    a.pow = Math.min(100, a.pow + (mv.pow + (counter ? 8 : 0)) * (a.isP && this.hasSk && this.hasSk('powerplus') ? 1.4 : 1)); b.pow = Math.min(100, b.pow + 5);
     // dizzy
     b.hitLog.push(t); b.hitLog = b.hitLog.filter(x => t - x < 150);
     if ((mv.dizzy || (b.hitLog.length >= 4 && b.dizzyCool <= 0)) && b.hp > 0) { b.dizzyT = mv.dizzy ? 85 : 70; b.dizzyCool = 320; b.hitLog = []; this.text(b.x, b.y - 78, 'SCHWINDELIG!', '#ffe060', 1); sfx.dizzy(); }
@@ -2420,8 +2426,8 @@ const MINI_DEF = {
 const Mini = {
   st: null,
   start(stat) {
-    const cost = trainCost(stat); if (save.coins < cost || save.stats[stat] >= STAT_MAX) return false;
-    save.coins -= cost; persist();
+    if (trainLeft() <= 0 || save.stats[stat] >= STAT_MAX) return false;
+    useTraining(); persist();
     const lvl = save.stats[stat];
     this.st = { stat, t: 0, phase: 'intro', score: 0, max: 1, taps: 0, marks: [], anim: 0, lvl, data: {} };
     const S = this.st;
@@ -2462,8 +2468,8 @@ const Mini = {
   done() {
     const S = this.st; S.phase = 'done'; S.t = 0;
     const pct = clamp(S.score / S.max, 0, 1); S.pct = pct;
-    S.gain = Math.min(STAT_MAX - save.stats[S.stat], 1 + (pct >= 0.55 ? 1 : 0) + (pct >= 0.88 ? 1 : 0));
-    save.stats[S.stat] += S.gain; save.rec.trainings++; questProg('train2', 1);
+    S.gain = 1 + (pct >= 0.55 ? 1 : 0) + (pct >= 0.88 ? 1 : 0);
+    S.xpGain = Math.round(S.gain * statNeed(save.stats[S.stat]) * 0.45); S.lvUp = addStatXp(S.stat, S.xpGain, true); save.rec.trainings++; questProg('train2', 1);
     addXP(15 + S.gain * 5); persist(); checkAch();
     sfx.levelup(); crowdReact(0.8);
   },
@@ -2547,8 +2553,8 @@ const Mini = {
       ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(0, H * 0.3, W, 230);
       const stars = S.gain; for (let i = 0; i < 3; i++) { const im = iconCanvas('star'); ctx.globalAlpha = i < stars ? 1 : 0.2; const sc = i < stars && S.t < 20 + i * 8 ? 1 + Math.max(0, (20 + i * 8 - S.t)) / 10 : 1; if (im.complete) ctx.drawImage(im, cx - 90 + i * 60 - 22 * sc + 22, H * 0.3 + 30 - 22 * sc + 22, 44 * sc, 44 * sc); }
       ctx.globalAlpha = 1;
-      outlineText('+' + S.gain + ' ' + STAT_LABEL[S.stat], cx, H * 0.3 + 120, 18, '#5be36a');
-      ctx.font = FONT(9); ctx.fillStyle = '#ccc'; ctx.fillText(STAT_LABEL[S.stat] + ' JETZT STUFE ' + save.stats[S.stat], cx, H * 0.3 + 150);
+      outlineText('+' + S.xpGain + ' ' + STAT_LABEL[S.stat] + '-EP', cx, H * 0.3 + 120, 16, '#5be36a');
+      ctx.font = FONT(9); ctx.fillStyle = '#ccc'; ctx.fillText((S.lvUp ? 'STUFE ' + save.stats[S.stat] + ' ERREICHT!' : STAT_LABEL[S.stat] + ' STUFE ' + save.stats[S.stat]), cx, H * 0.3 + 150);
       if (S.t > 40) { ctx.fillStyle = (t >> 4) % 2 ? '#fff' : '#ffcf3a'; ctx.fillText('TIPPE ZUM FORTFAHREN', cx, H * 0.3 + 200); }
     }
   },
@@ -3170,6 +3176,511 @@ async function shareImage(c, text) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   07b EXTENSIONS (Update 3): Seasons, Rival, Stat-EP, Schuljahre,
+   Skilltree, Boss abilities + Block, Friend league
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ═══ MIGRATION ═══ */
+(function migrate() {
+  if (!save.skills) { save.skills = { owned: [], eq: [] }; save.skillPts = Math.max(0, (save.level || 1) - 1); }
+  if (save.skillPts === undefined) save.skillPts = 0;
+  if (!save.statXp) save.statXp = { kraft: 0, ausdauer: 0, tempo: 0, technik: 0 };
+  if (!save.trainDay) save.trainDay = { date: '', used: 0 };
+  if (!save.friends) save.friends = [];
+  if (save.prestige === undefined) save.prestige = 0;
+  if (!save.rival) save.rival = { w: 0, l: 0 };
+  if (!save.bossBeaten) save.bossBeaten = [];
+  if (save.seasonNo === undefined) save.seasonNo = 0;
+})();
+
+const _addXP = addXP;
+addXP = function (n) { const l0 = save.level; _addXP(n); if (save.level > l0) save.skillPts += save.level - l0; };
+/* ═══ PRESTIGE / SCALING ═══ */
+const _makeOpp = makeOpp;
+makeOpp = function (tier, rank, extra = 0) {
+  const rep = save.season && save.season.tier === tier ? (save.season.repeat || 0) : 0;
+  return _makeOpp(tier, rank, extra + (save.prestige || 0) * 1.6 + Math.min(4, rep) * 0.3);
+};
+const _pMaxHp = pMaxHp, _pDmgM = pDmgM;
+pMaxHp = () => Math.round(_pMaxHp() * (1 + (save.prestige || 0) * 0.06));
+pDmgM = () => _pDmgM() * (1 + (save.prestige || 0) * 0.06);
+const PRESTIGE_NAMES = ['', 'BRONZE', 'SILBER', 'GOLD', 'DIAMANT'];
+function pStars() { return save.prestige ? 'SJ' + (save.prestige + 1) : ''; }
+COSM.top.push(['#b8733a', 'BRONZE', 0, 'p1'], ['#c4c8d4', 'SILBER', 0, 'p2'], ['#62e6ff', 'DIAMANT', 0, 'p3']);
+
+/* ═══ STAT EXPERIENCE ═══ */
+function statNeed(l) { return 40 + l * 14; }
+function addStatXp(stat, n, quiet) {
+  let up = false;
+  if (save.stats[stat] >= STAT_MAX) return false;
+  save.statXp[stat] = (save.statXp[stat] || 0) + Math.round(n);
+  while (save.stats[stat] < STAT_MAX && save.statXp[stat] >= statNeed(save.stats[stat])) {
+    save.statXp[stat] -= statNeed(save.stats[stat]); save.stats[stat]++; up = true;
+  }
+  if (save.stats[stat] >= STAT_MAX) save.statXp[stat] = 0;
+  if (up && !quiet) setTimeout(() => UI.toast(STAT_LABEL[stat] + ' STUFE ' + save.stats[stat] + '!', 'Durch Kampferfahrung stärker geworden.', MINI_DEF[stat].icon), 600);
+  return up;
+}
+function fightStatXp(res) {
+  const tier = Fight.cfg && Fight.cfg.opp && Fight.cfg.opp.tier || 0;
+  const k = (res.won ? 1 : 0.6) / (1 + tier * 0.45);
+  return {
+    kraft: Math.round(((res.dmgDealt || 0) * 0.32 + 6) * k),
+    ausdauer: Math.round(((res.dmgTaken || 0) * 0.42 + 8) * k),
+    tempo: Math.round(((res.dodges || 0) * 6 + (res.perfects || 0) * 10 + 5) * k),
+    technik: Math.round(((res.counters || 0) * 8 + (res.perfects || 0) * 5 + (res.maxCombo || 0) * 3 + (res.specialHits || 0) * 8 + 4) * k),
+  };
+}
+const _applyFightStats = applyFightStats;
+applyFightStats = function (res) {
+  _applyFightStats(res);
+  if (res.noXp) return;
+  const g = fightStatXp(res); res.statGains = g;
+  for (const s in g) addStatXp(s, g[s]);
+};
+function trainMax() { return 3 + (save.upgrades.trainer ? 2 : 0); }
+function trainLeft() { if (save.trainDay.date !== todayStr()) return trainMax(); return Math.max(0, trainMax() - save.trainDay.used); }
+function useTraining() { if (save.trainDay.date !== todayStr()) save.trainDay = { date: todayStr(), used: 0 }; save.trainDay.used++; }
+UPGRADES.trainer = { icon: 'dumbbell', name: 'TRAINER-VERTRAG', desc: '+2 Trainings pro Tag (5 statt 3).', price: 2200 };
+
+/* ═══ SKILLTREE ═══ */
+const SKILLS = {
+  konterhaken: { name: 'KONTERHAKEN', desc: 'Konter machen x1,7 statt x1,35 Schaden.', cost: 2, lvl: 3, icon: 'fist' },
+  rolle: { name: 'BLITZROLLE', desc: 'Ausweichen kostet nur 16 statt 25 Ausdauer.', cost: 2, lvl: 4, icon: 'wind' },
+  powerplus: { name: 'POWER-JUNKIE', desc: 'Power-Leiste lädt 40% schneller.', cost: 2, lvl: 6, icon: 'star' },
+  doppelkick: { name: 'DOPPELKICK', desc: 'Kicks treffen ein zweites Mal (50% Schaden).', cost: 3, lvl: 8, icon: 'boot' },
+  brecher: { name: 'BLOCKBRECHER', desc: 'Auch Boxhiebe durchbrechen gegnerische Blocks.', cost: 2, lvl: 10, icon: 'bolt' },
+  ellbogen: { name: 'ELLBOGEN-KOMBO', desc: 'Jeder 3. Treffer einer Kombo macht +80% Schaden.', cost: 3, lvl: 12, icon: 'swords' },
+  eisenhaut: { name: 'EISENHAUT', desc: 'Du bekommst 15% weniger Schaden.', cost: 3, lvl: 14, icon: 'schoner' },
+  adrenalin: { name: 'ADRENALIN', desc: 'Unter 30% Leben machst du +35% Schaden.', cost: 3, lvl: 16, icon: 'flame' },
+  zweite: { name: 'STEHAUFMÄNNCHEN', desc: '1x pro Kampf: einen K.O. mit 1 HP überleben.', cost: 4, lvl: 20, icon: 'heart' },
+};
+function skillSlots() { return 2 + (save.level >= 18 ? 1 : 0) + Math.min(2, save.prestige || 0); }
+
+/* ═══ BOSS ABILITIES ═══ */
+MOVES.stomp = { su: 34, ac: 6, re: 24, range: 104, arc: Math.PI, dmg: 20, kb: 9, pow: 0, kind: 'special', stomp: true };
+const BOSS_ABIL = ['charge', 'flurry', 'charge', 'storm', 'stomp'];
+const ABIL_TXT = { charge: 'RAMMT LOS!', flurry: 'FAUSTHAGEL!', storm: 'STURMWIRBEL!', stomp: 'STAMPFT!' };
+
+/* ═══ RIVAL ═══ */
+const RIVAL_LOOK = L('#f0c8a0', '#e4e4ec', 'stachel', '#1c1c24', 'jacke', '#141418', 'sonnenbrille', null, '#e8e8e8');
+function makeRival(tier) {
+  const o = makeOpp(tier, 4);
+  const k = clamp(playerRating() / Math.max(1, o.rating), 1, 1.35);
+  const r = save.rival;
+  Object.assign(o, {
+    id: 'rv', rival: true, name: 'DANNY', nick: 'DEIN RIVALE', trait: 'techniker', look: RIVAL_LOOK,
+    hp: Math.round(o.hp * k), dmg: o.dmg * (1 + (k - 1) * 0.6), skill: Math.min(0.95, o.skill + 0.1), special: ['wirbel', 'donner', 'rempler'][tier % 3],
+    line: r.w + r.l === 0 ? 'Ich bin DANNY. Merk dir den Namen – du wirst ihn hassen.' : r.l > r.w ? 'Schon wieder du? Letztes Mal hast du fast geheult!' : r.w > r.l ? 'Diesmal nicht! Ich hab den ganzen Sommer trainiert.' : 'Unentschieden steht es. Heute ändert sich das.',
+  });
+  o.rating = oppRating(o); return o;
+}
+
+/* ═══ SEASON ═══ */
+const TEAM_IDS = ['me', 'o5', 'rv', 'o4', 'o3', 'o2', 'o1', 'o0'];
+const Season = {
+  ensure() {
+    if (!save.season || save.season.tier !== save.tier) this.create(0);
+    else if (this.done() && Game.mode === 'menu') Career.finishSeason(this.endInfo());
+  },
+  endInfo() { const r = this.rank(); return { rank: r, outcome: this.outcome(), prize: this.prize(r), tier: save.season.tier, no: save.season.no }; },
+  create(repeat) {
+    const ids = TEAM_IDS.slice(), n = ids.length, rounds = [];
+    const arr = ids.slice(1);
+    for (let r = 0; r < n - 1; r++) {
+      const all = [ids[0], ...arr], day = [];
+      for (let i = 0; i < n / 2; i++) day.push(r % 2 ? [all[n - 1 - i], all[i]] : [all[i], all[n - 1 - i]]);
+      rounds.push(day); arr.unshift(arr.pop());
+    }
+    const sched = rounds.concat(rounds.map(d => d.map(([a, b]) => [b, a])));
+    const table = {}; ids.forEach(id => table[id] = { p: 0, w: 0, l: 0, m: 0, form: [] });
+    save.seasonNo++;
+    save.season = { tier: save.tier, day: 0, sched, table, repeat: repeat || 0, no: save.seasonNo };
+  },
+  opp(id) { const T = save.season.tier; return id === 'rv' ? makeRival(T) : makeOpp(T, +id[1]); },
+  name(id) { return id === 'me' ? (save.name || 'DU') : id === 'rv' ? 'DANNY' : OPP_DEF[save.season.tier][+id[1]][0]; },
+  look(id) { return id === 'me' ? save.look : id === 'rv' ? RIVAL_LOOK : OPP_DEF[save.season.tier][+id[1]][2]; },
+  rating(id) { return id === 'me' ? playerRating() : this.opp(id).rating; },
+  nextId() { const S = save.season; if (S.day >= S.sched.length) return null; const p = S.sched[S.day].find(x => x.includes('me')); return p[0] === 'me' ? p[1] : p[0]; },
+  apply(a, b, aWon, margin) {
+    const T = save.season.table, A = T[a], B = T[b];
+    const w = aWon ? A : B, l = aWon ? B : A;
+    w.p += 3; w.w++; l.l++; w.m += margin; l.m -= margin;
+    w.form = [...w.form, 'S'].slice(-5); l.form = [...l.form, 'N'].slice(-5);
+  },
+  record(oppId, won, margin) {
+    const S = save.season; const day = S.sched[S.day];
+    this.apply('me', oppId, won, Math.max(1, Math.round(Math.abs(margin))));
+    for (const [a, b] of day) {
+      if (a === 'me' || b === 'me') continue;
+      const ra = Math.pow(this.rating(a), 2), rb = Math.pow(this.rating(b), 2);
+      this.apply(a, b, Math.random() < ra / (ra + rb), rint(8, 70));
+    }
+    S.day++;
+  },
+  sorted() { const T = save.season.table; return Object.keys(T).sort((x, y) => T[y].p - T[x].p || T[y].w - T[x].w || T[y].m - T[x].m); },
+  rank() { return this.sorted().indexOf('me') + 1; },
+  done() { return save.season.day >= save.season.sched.length; },
+  outcome() {
+    const r = this.rank(), t = save.season.tier;
+    if (r === 1 && t === 4) return 'champ';
+    if (r <= 2 && t < 4) return 'promo';
+    if (r >= 7 && t > 0) return 'relegate';
+    return 'stay';
+  },
+  prize(r) { return Math.round([500, 300, 180, 120, 90, 70, 50, 40][r - 1] * (save.season.tier + 1)); },
+};
+
+/* ═══ CAREER (season based) ═══ */
+Object.assign(Career, {
+  opp() { Season.ensure(); const id = Season.nextId(); return id ? Season.opp(id) : null; },
+  start(loadout) {
+    Season.ensure(); const id = Season.nextId(); if (!id) return;
+    const o = Season.opp(id), big = o.boss || o.rival;
+    Game.startFight({ mode: o.boss ? 'boss' : 'career', opp: o, rounds: big ? 2 : 1, time: 60, loadout, title: o.boss ? 'BOSSKAMPF' : o.rival ? 'RIVALEN-DUELL' : 'SPIELTAG ' + (save.season.day + 1), onEnd: res => this.end(res, o, id) });
+  },
+  end(res, o, id) {
+    applyFightStats(res);
+    const rw = fightRewards(res, o, 'career');
+    addCoins(rw.total); addXP(rw.xp);
+    const margin = ((res.hpPct || 0) - (res.eHpPct || 0)) * 100;
+    Season.record(id, res.won, margin);
+    if (o.rival) { if (res.won) save.rival.w++; else { save.rival.l++; setTimeout(() => UI.toast('DANNY:', '"Haha! Wir sehen uns wieder!"', 'flame'), 1200); } }
+    if (o.boss && res.won && !save.bossBeaten.includes(o.tier)) save.bossBeaten.push(o.tier);
+    // revenge challenge offer
+    if (!save.revenge && save.bossBeaten.some(t => t !== save.tier) && Math.random() < 0.22) {
+      const from = pick(save.bossBeaten.filter(t => t !== save.tier)); save.revenge = { from };
+      setTimeout(() => UI.toast('REVANCHE!', OPP_DEF[from][5][0] + ' will dich nochmal herausfordern!', 'swords'), 2200);
+    }
+    let seasonEnd = null;
+    if (Season.done()) seasonEnd = Season.endInfo();
+    persist(); checkAch();
+    UI.result({ res, opp: o, rw, kind: 'career', seasonEnd });
+  },
+  finishSeason(se) {
+    if (!save.season || save.season.no !== se.no) return;
+    addCoins(se.prize);
+    if (se.outcome === 'promo') { save.tier = Math.min(4, save.tier + 1); Season.create(0); }
+    else if (se.outcome === 'relegate') { save.tier = Math.max(0, save.tier - 1); Season.create(0); }
+    else if (se.outcome === 'champ') { save.champion = true; save.rec.titles = (save.rec.titles || 0) + 1; Season.create((save.season.repeat || 0) + 1); }
+    else Season.create((save.season.repeat || 0) + 1);
+    persist(); checkAch();
+  },
+  revenge(loadout) {
+    const from = save.revenge.from, d = OPP_DEF[from][5];
+    const o = makeOpp(save.tier, 5, 0.5);
+    Object.assign(o, { name: d[0], nick: 'REVANCHE', look: d[2], line: 'Revanche! Diesmal mach ich dich fertig!', abilTier: from, id: 'rev' });
+    o.rating = oppRating(o);
+    Game.startFight({ mode: 'boss', opp: o, rounds: 2, time: 60, loadout, title: 'REVANCHE', onEnd: res => {
+      applyFightStats(res); save.revenge = null;
+      const rw = fightRewards(res, o, 'career'); if (res.won) { const b = addCoins(150 + save.tier * 80); rw.lines.push(['REVANCHE GEWONNEN', b]); rw.total += b; }
+      addCoins(rw.total); addXP(rw.xp); persist(); checkAch(); UI.result({ res, opp: o, rw, kind: 'career' });
+    } });
+  },
+});
+function doPrestige() {
+  save.prestige = (save.prestige || 0) + 1;
+  save.ach['p' + Math.min(3, save.prestige)] = true;
+  save.tier = 0; save.champion = false; save.revenge = null; save.bossBeaten = [];
+  save.stats = { kraft: 1, ausdauer: 1, tempo: 1, technik: 1 }; save.statXp = { kraft: 0, ausdauer: 0, tempo: 0, technik: 0 };
+  save.skillPts += 3; save.rival = { w: 0, l: 0 };
+  Season.create(0); persist();
+}
+
+/* ═══ FIGHT HOOKS ═══ */
+Object.assign(Fight, {
+  hasSk(id) { return !!(this.pSk && this.pSk.includes(id)); },
+  dmgMods(a, b, mv) {
+    let k = 1;
+    if (a.isP) {
+      if (this.hasSk('adrenalin') && a.hp < a.maxHp * 0.3) k *= 1.35;
+      if (this.hasSk('ellbogen') && a.combo >= 3 && a.combo % 3 === 0) { k *= 1.8; this.text(b.x, b.y - 96, 'ELLBOGEN!', '#ff8a1f', 1.1); }
+    }
+    if (b.isP && this.hasSk('eisenhaut')) k *= 0.85;
+    return k;
+  },
+  blockCheck(a, b, mv, d) {
+    const toA = Math.atan2(a.y - b.y, a.x - b.x);
+    if (Math.abs(normA(toA - b.ang)) > 1.3) return false; // hit from side/back
+    const breaks = mv.kind !== 'punch' || (a.isP && this.hasSk('brecher'));
+    if (breaks) {
+      b.st = 'idle'; b.blockT = 0; this.text(b.x, b.y - 90, 'BLOCK GEBROCHEN!', '#ffcf3a', 1.1); sfx.crit(); this.shake = 8;
+      this.landHit(a, b, mv, d); if (b.hp > 0 && b.st !== 'down') { b.dizzyT = 45; b.hurtT = Math.max(b.hurtT, 10); }
+      return true;
+    }
+    a.hitDone = true; a.missT = 14;
+    const chip = Math.max(1, Math.round(mv.dmg * a.dmgM * 0.15)); b.hp = Math.max(1, b.hp - chip); b.pow = Math.min(100, b.pow + 6);
+    const kx = (b.x - a.x) / (d || 1), ky = (b.y - a.y) / (d || 1); b.vx += kx * 2; b.vy += ky * 2;
+    this.text(b.x, b.y - 86, 'GEBLOCKT', '#7ae8ff', 1); sfx.hit('punch', 0); this.fx.push({ k: 'ring', x: b.x + Math.cos(b.ang) * 18, y: b.y - 30, life: 10, max: 10, r0: 6, r1: 26 });
+    if (a.isP && !this._blockTip) { this._blockTip = true; this.banner('KICKS BRECHEN BLOCKS!', '#ffcf3a', 70, 12); }
+    return true;
+  },
+});
+const _fStart = Fight.start, _fStep = Fight.step, _fPress = Fight.press, _fFinish = Fight.finish, _fBegin = Fight.beginRound, _fSwoosh = Fight.swoosh, _fDrawFighter = Fight.drawFighter;
+Fight.start = function (cfg) {
+  this.pSk = cfg.mode === 'tutorial' ? [] : (save.skills.eq || []).slice();
+  this.delayed = []; this.usedSecond = false; this._blockTip = false;
+  _fStart.call(this, cfg);
+  this.stats.dmgDealt = 0; this.stats.dodges = 0;
+  this.p.dodgeCost = this.hasSk('rolle') ? 16 : 25;
+  const o = cfg.opp;
+  this.ai.canBlock = cfg.mode !== 'tutorial' && (o.tier >= 2 || o.boss || o.rival || o.trait === 'panzer' || o.trait === 'konter');
+  this.ai.abil = o.boss ? BOSS_ABIL[o.abilTier !== undefined ? o.abilTier : o.tier] : null;
+  this.ai.abilT = 300; this.ai.phase2 = false;
+  if (pStars()) this.p.name = (save.name || 'DU').slice(0, 5) + ' ' + pStars();
+};
+Fight.beginRound = function (first) {
+  _fBegin.call(this, first);
+  if (!first && this.ai && !this.tut && this.round === 2) {
+    const o = this.ai.o, sw = { aggressiv: 'konter', konter: 'aggressiv', blitz: 'panzer', panzer: 'blitz', ausweicher: 'aggressiv', techniker: 'konter', standard: 'aggressiv' };
+    this.ai.o = Object.assign({}, o, { trait: sw[o.trait] || 'aggressiv', skill: Math.min(0.97, o.skill + 0.05) });
+    this.ai.want = this.ai.o.trait === 'konter' ? 70 : 46;
+    this.roundTip = 80;
+    setTimeout(() => { if (Fight.active) Fight.banner(o.name + ': NEUE TAKTIK – ' + TRAITS[Fight.ai.o.trait].label + '!', '#ff8a1f', 80, 10); }, 2600);
+  }
+};
+Fight.step = function () {
+  if (this.delayed && this.delayed.length && (this.phase === 'play')) {
+    for (const h of this.delayed) {
+      if (--h.t > 0) continue; h.t = -1; const b = h.b; if (b.st === 'down') continue;
+      b.hp = Math.max(0, b.hp - h.dmg); this.stats.dmgDealt += h.dmg;
+      this.text(b.x, b.y - 60, '+' + h.dmg, '#ffcf3a', 0.9); this.burst(b.x, b.y - 30, ['#ffcf3a', '#ffffff'], 6, 3); sfx.hit('punch', 1);
+      if (b.hp <= 0) this.ko(h.a, b, MOVES.kick);
+    }
+    this.delayed = this.delayed.filter(h => h.t >= 0);
+  }
+  _fStep.call(this);
+};
+Fight.press = function (btn) {
+  const before = this.p && this.p.st;
+  _fPress.call(this, btn);
+  if (btn === 'dodge' && this.p && this.p.st === 'dodge' && before !== 'dodge') this.stats.dodges = (this.stats.dodges || 0) + 1;
+};
+Fight.finish = function () {
+  const e = this.e; const prev = this.cfg.onEnd;
+  const eHp = e ? e.hp / e.maxHp : 0;
+  this.cfg.onEnd = res => { res.eHpPct = eHp; res.dmgDealt = this.stats.dmgDealt; res.dodges = this.stats.dodges; if (this.cfg.mode === 'tutorial') res.noXp = true; prev && prev(res); };
+  _fFinish.call(this);
+};
+Fight.swoosh = function (f, mv) {
+  _fSwoosh.call(this, f, mv);
+  if (mv.stomp) { this.shake = 14; this.flash = 4; this.flashCol = '#ffb060'; for (let i = 0; i < 3; i++) this.fx.push({ k: 'ring', x: f.x, y: f.y, life: 16 + i * 5, max: 16 + i * 5, r0: 10, r1: 110 }); this.dust(f.x, f.y, 14); sfx.ko(); }
+};
+Fight.drawFighter = function (f) {
+  _fDrawFighter.call(this, f);
+  if (f.st === 'block') {
+    ctx.save(); ctx.translate(f.x, f.y - 30); ctx.rotate(f.ang);
+    ctx.strokeStyle = `rgba(122,232,255,${0.55 + Math.sin(t * 0.4) * 0.25})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(0, 0, 30, -1.1, 1.1); ctx.stroke();
+    ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, 36, -0.9, 0.9); ctx.stroke(); ctx.restore();
+  }
+};
+
+/* ═══ AI HOOKS: block + boss abilities ═══ */
+const _aiUpdate = AI.prototype.update;
+AI.prototype.update = function (foe) {
+  const f = this.f, o = this.o;
+  if (this.passive || f.st === 'down' || f.st === 'win') return;
+  const d = dist(f.x, f.y, foe.x, foe.y);
+  // phase 2 for bosses
+  if (o.boss && !this.phase2 && f.hp < f.maxHp * 0.5) { this.phase2 = true; this.abilT = 60; Fight.banner(o.name + ' WECHSELT DIE TAKTIK!', '#ff4a3d', 70, 12); }
+  // storm pull
+  if (this.abil === 'storm' && f.st === 'atk' && f.mvId === 'wirbel' && f.ph === 'ac' && foe.st !== 'dodge') { foe.vx += (f.x - foe.x) / (d || 1) * 0.55; foe.vy += (f.y - foe.y) / (d || 1) * 0.55; }
+  // flurry queue
+  if (this.flurry > 0 && f.st === 'idle') { this.face(foe); if (d > 46) { f.vx += (foe.x - f.x) / d * 3; f.vy += (foe.y - f.y) / d * 3; } f.attack('punch'); this.flurry--; return; }
+  // block decision
+  if (this.canBlock && foe.st === 'atk' && foe.ph === 'su' && foe.atkId !== this.blocked && f.st === 'idle' && d < foe.mv.range + 30) {
+    this.blocked = foe.atkId;
+    const p = o.skill * (o.trait === 'panzer' ? 0.75 : o.trait === 'konter' ? 0.55 : 0.4);
+    if (Math.random() < p) { this.face(foe); f.st = 'block'; f.blockT = foe.pt + (foe.mv ? foe.mv.ac : 6) + 8; this.reacted = foe.atkId; return; }
+  }
+  // boss abilities
+  if (this.abil && f.st === 'idle' && --this.abilT <= 0 && d < (this.abil === 'charge' ? 170 : this.abil === 'stomp' ? 120 : 95)) {
+    this.abilT = (this.phase2 ? 200 : 330) + rint(0, 80);
+    Fight.banner(o.name + ' ' + ABIL_TXT[this.abil], '#ff8a1f', 50, 13);
+    this.face(foe);
+    if (this.abil === 'flurry') { this.flurry = 3; return; }
+    f.pow = 100;
+    f.attack(this.abil === 'charge' ? 'rempler' : this.abil === 'storm' ? 'wirbel' : 'stomp');
+    return;
+  }
+  _aiUpdate.call(this, foe);
+};
+
+/* ═══ FRIEND LEAGUE ═══ */
+function addFriend(o, code) {
+  let fr = save.friends.find(x => x.name === o.name);
+  if (!fr) { fr = { name: o.name, w: 0, l: 0 }; save.friends.push(fr); }
+  fr.code = code; fr.lvl = o.nick; fr.look = o.look; fr.rating = o.rating; persist(); return fr;
+}
+const _friendStart = Friend.start;
+Friend.start = function (o, loadout) {
+  const code = o._code;
+  Game.startFight({ mode: 'friend', opp: o, rounds: 2, time: 60, loadout, title: 'HERAUSFORDERUNG', arena: o.tier, onEnd: res => {
+    applyFightStats(res);
+    const fr = save.friends.find(x => x.name === o.name); if (fr) { if (res.won) fr.w++; else fr.l++; }
+    const key = todayStr() + o.name; save.friendWins = save.friendWins || {};
+    let coins = 0; if (res.won && !save.friendWins[key]) { coins = 60 + o.tier * 30; save.friendWins[key] = 1; }
+    addCoins(coins); addXP(res.won ? 50 : 20); persist(); checkAch();
+    UI.result({ res, opp: o, rw: { lines: coins ? [['SIEG GEGEN FREUND', coins]] : [], total: coins, xp: res.won ? 50 : 20 }, kind: 'friend' });
+  } });
+};
+
+/* ═══ UI OVERRIDES ═══ */
+Object.assign(UI, {
+  seasonTable(compact) {
+    const S = save.season, T = S.table, ids = Season.sorted(), nextId = Season.nextId();
+    return h('div', null, ids.map((id, i) => {
+      const r = T[id], me = id === 'me', zone = i < 2 && S.tier < 4 ? 'var(--green)' : (i === 0 && S.tier === 4 ? 'var(--gold)' : (i >= 6 && S.tier > 0 ? 'var(--red)' : 'transparent'));
+      return h('div.row', { style: `padding:${compact ? 4 : 7}px 6px;margin:3px 2px;background:${me ? '#1c2a18' : '#0e0e14'};box-shadow:0 0 0 2px #000,inset 4px 0 0 ${zone}${id === nextId ? ',0 0 0 4px var(--gold)' : ''}` },
+        h('span.t8', { style: 'width:20px;color:var(--dim)', text: i + 1 }),
+        h('img.px', { style: `width:${compact ? 22 : 28}px;height:${compact ? 20 : 26}px`, src: Doll.portrait(Season.look(id)).url }),
+        h('div', { style: 'flex:1;min-width:0' }, h('div.t8' + (me ? '.green' : id === 'rv' ? '.orange' : ''), { text: Season.name(id) + (id === 'o5' ? ' (BOSS)' : '') }),
+          compact ? null : h('div.t7.dim', { style: 'margin-top:4px', text: r.w + 'S ' + r.l + 'N  ' + r.form.join(' ') })),
+        compact ? null : h('span.t7.dim', { style: 'width:44px;text-align:right', text: (r.m > 0 ? '+' : '') + r.m }),
+        h('span.t10.gold', { style: 'width:34px;text-align:right', text: r.p }));
+    }));
+  },
+  tabFight(s) {
+    Season.ensure();
+    const S = save.season, lg = LEAGUES[S.tier], id = Season.nextId(), o = id ? Season.opp(id) : null, pr = playerRating();
+    s.append(h('div.stage', null, h('div.chip', null, h('span', { style: 'color:' + lg.col, text: lg.name }), ' • PLATZ ' + Season.rank() + (pStars() ? ' • ' + pStars() : ''))));
+    if (save.revenge) {
+      const d = OPP_DEF[save.revenge.from][5];
+      s.append(h('div.card.hl', { style: 'box-shadow:0 0 0 3px #000,0 0 0 5px var(--red)' }, h('div.row', null, h('img.px', { style: 'width:44px;height:40px', src: Doll.portrait(d[2], 'idle').url }),
+        h('div', { style: 'flex:1' }, h('div.t9.red', { text: 'REVANCHE!' }), h('div.t7.dim.lh', { style: 'margin-top:5px', text: d[0] + ' will es nochmal wissen. Bonus-Münzen bei Sieg!' })),
+        h('button.btn.red.small', { tap: () => { sfx.ui(); const ro = makeOpp(save.tier, 5, 0.5); Object.assign(ro, { name: d[0], look: d[2], line: 'Revanche! Diesmal mach ich dich fertig!', nick: 'REVANCHE' }); ro.rating = oppRating(ro); this.prefight(ro, 'REVANCHE', lo => Career.revenge(lo)); } }, 'KAMPF'))));
+    }
+    if (save.champion) {
+      s.append(h('div.card.hl', { style: 'box-shadow:0 0 0 3px #000,0 0 0 5px var(--gold)' }, h('div.row', null, ic('crown', 'width:34px;height:34px'),
+        h('div', { style: 'flex:1' }, h('div.t9.gold', { text: 'NEUES SCHULJAHR' }), h('div.t7.dim.lh', { style: 'margin-top:5px', text: 'Starte als Weltmeister neu: stärkere Gegner, +6% Leben & Schaden für immer, neue Belohnungen.' })),
+        h('button.btn.gold.small', { tap: () => this.prestigeDlg() }, 'START'))));
+    }
+    const tableEl = this.seasonTable(true);
+    s.append(h('div.card.hl', null,
+      h('div.row', null, h('div', null, h('div.t12.sh', { style: 'color:' + lg.col, text: lg.name }), h('div.t7.dim', { style: 'margin-top:5px', text: 'SAISON ' + S.no + ' • SPIELTAG ' + Math.min(S.day + 1, 14) + '/14' })), h('div.sp'), h('div.t7.dim', { style: 'text-align:right;line-height:1.7', text: S.tier < 4 ? 'TOP 2: AUFSTIEG' : 'PLATZ 1: WELTMEISTER' }, h('br'), S.tier > 0 ? h('span.red', { text: 'PLATZ 7-8: ABSTIEG' }) : null)),
+      h('div', { style: 'margin:10px 0' }, tableEl),
+      o ? h('div.opp', null, h('div.pic', null, h('img.px', { src: Doll.portrait(o.look, 'idle').url })),
+        h('div', { style: 'flex:1;min-width:0' },
+          h('div.t7.dim', { text: o.boss ? 'BOSS DER LIGA' : o.rival ? 'DEIN RIVALE • BILANZ ' + save.rival.w + ':' + save.rival.l : 'NÄCHSTER GEGNER' }),
+          h('div.t10.sh', { style: 'margin:5px 0;color:' + (o.boss ? 'var(--gold)' : o.rival ? 'var(--orange)' : '#fff'), text: o.name + (o.nick && !o.rival ? ' "' + o.nick + '"' : '') }),
+          h('div.t7.orange', { text: TRAITS[o.trait].label + (o.boss || o.rival ? ' • BEST OF 3' : '') }),
+          h('div.vsr', null, 'KRAFT ', h('span', { style: 'color:var(--blue)', text: pr }), ' VS ', h('span', { style: 'color:' + (pr >= o.rating * 1.05 ? 'var(--green)' : pr >= o.rating * 0.9 ? 'var(--gold)' : 'var(--red)'), text: o.rating })))) : null,
+      o ? h('button.btn.gold.big.wide', { style: 'margin-top:12px', tap: () => { sfx.ui(); this.prefight(o, o.boss ? 'BOSSKAMPF' : o.rival ? 'RIVALEN-DUELL' : 'SPIELTAG ' + (S.day + 1), lo => Career.start(lo)); } }, ic('swords'), o.boss ? 'BOSS HERAUSFORDERN' : o.rival ? 'GEGEN DANNY!' : 'KÄMPFEN!') : null));
+    const best = save.rec.marathonBest;
+    s.append(h('div.grid2', null,
+      h('div.card.mode', { tap: () => { sfx.ui(); this.tourneySelect(); } }, h('img.px.ic', { src: iconUrl('trophy') }), h('div.nm', { text: 'TURNIER' }), h('div.ds', { text: 'K.O.-System mit 8 Kämpfern. Hol dir den Pokal!' })),
+      h('div.card.mode', { tap: () => { sfx.ui(); this.marathonIntro(); } }, h('img.px.ic', { src: iconUrl('run') }), h('div.nm', { text: 'MARATHON' }), h('div.ds', { text: 'Endlos-Modus. Rekord: ' + best })),
+      h('div.card.mode', { tap: () => { sfx.ui(); this.prefight(null, 'SPARRING', lo => Sparring.start(lo)); } }, h('img.px.ic', { src: iconUrl('fist') }), h('div.nm', { text: 'SPARRING' }), h('div.ds', { text: 'Freier Kampf für Münzen, EP & Aufgaben.' })),
+      h('div.card.mode', { tap: () => { sfx.ui(); this.league(); } }, h('img.px.ic', { src: iconUrl('medal') }), h('div.nm', { text: 'TABELLE' }), h('div.ds', { text: 'Ganze Tabelle mit Bilanz und Form.' }))));
+    if (save.streak >= 2) s.append(h('div.card', { style: 'text-align:center' }, h('div.row', { style: 'justify-content:center' }, ic('flame', 'width:24px;height:24px'), h('span.t9.orange', { text: save.streak + ' SIEGE IN FOLGE!' }))));
+  },
+  league() {
+    Season.ensure(); const S = save.season, lg = LEAGUES[S.tier];
+    const close = this.open([h('h2', { style: 'color:' + lg.col, text: lg.name }), h('div.sub', { text: 'SAISON ' + S.no + ' • SPIELTAG ' + Math.min(S.day + 1, 14) + '/14. Jeder spielt zweimal gegen jeden. Sieg = 3 Punkte.' + (S.tier < 4 ? ' Platz 1-2 steigt auf.' : ' Platz 1 wird Weltmeister.') + (S.tier > 0 ? ' Platz 7-8 steigt ab!' : '') }),
+      this.seasonTable(false), h('div.t7.dim', { style: 'text-align:center;margin-top:8px', text: 'S = SIEG • N = NIEDERLAGE • ZAHL = DIFFERENZ' }),
+      h('button.btn.dark.wide', { style: 'margin-top:10px', tap: () => { sfx.back(); close(); } }, 'SCHLIESSEN')]);
+  },
+  tabTrain(s) {
+    s.append(h('div', { style: 'height:14px' }));
+    const seg = h('div.seg', null, [['werte', 'WERTE'], ['skills', 'TECHNIKEN' + (save.skillPts ? ' (' + save.skillPts + ')' : '')]].map(([id, l]) => h('div' + ((this.trainSeg || 'werte') === id ? '.on' : ''), { tap: () => { sfx.ui(); this.trainSeg = id; this.renderTab(); }, text: l })));
+    s.append(seg);
+    if ((this.trainSeg || 'werte') === 'skills') return this.tabSkills(s);
+    const left = trainLeft();
+    s.append(h('div.card.hl', null, h('h3', { text: 'ERFAHRUNG' }), h('div.t7.dim.lh', { text: 'Deine Werte steigen durch KÄMPFEN: Schaden machen = Kraft, Schaden einstecken = Ausdauer, Ausweichen = Tempo, Konter & Kombos = Technik. Training gibt zusätzlich EP.' }),
+      h('div.row.t9', { style: 'margin-top:10px' }, 'KAMPFKRAFT: ', h('span.blue', { text: playerRating() }), h('div.sp'), h('span', { style: 'color:' + (left ? 'var(--green)' : 'var(--red)'), text: 'TRAINING HEUTE: ' + left + '/' + trainMax() }))));
+    for (const st of ['kraft', 'ausdauer', 'tempo', 'technik']) {
+      const lvl = save.stats[st], max = lvl >= STAT_MAX, need = statNeed(lvl), xp = save.statXp[st] || 0;
+      s.append(h('div.card', null, h('div.stat', null,
+        h('div.ic', null, ic(MINI_DEF[st].icon)),
+        h('div', null,
+          h('div.row', null, h('span.t10', { text: STAT_LABEL[st] }), h('div.sp'), h('span.t8.gold', { text: 'STUFE ' + lvl + '/' + STAT_MAX })),
+          h('div.bar', { style: 'margin:8px 0' }, h('i', { style: `width:${max ? 100 : xp / need * 100}%;background:var(--blue)` })),
+          h('div.t7.dim', { text: max ? 'MAXIMUM' : xp + '/' + need + ' EP • ' + STAT_DESC[st]() }))),
+        h('button.btn.gold.wide' + (max || !left ? '.dis' : ''), { style: 'margin-top:10px', tap: () => { if (Mini.start(st)) { sfx.ui(); this.clear(); } } }, max ? 'MAXIMUM' : left ? MINI_DEF[st].name + ' (+EP)' : 'MORGEN WIEDER')));
+    }
+  },
+  tabSkills(s) {
+    const slots = skillSlots(), eq = save.skills.eq;
+    s.append(h('div.card.hl', null, h('h3', { text: 'TECHNIKEN' }), h('div.t7.dim.lh', { text: 'Pro Level-Aufstieg bekommst du 1 Technikpunkt. Lerne Techniken und rüste bis zu ' + slots + ' gleichzeitig aus. Ab Level 18 und mit jedem Schuljahr gibt es mehr Plätze.' }),
+      h('div.row.t9', { style: 'margin-top:10px' }, 'PUNKTE: ', h('span.gold', { text: save.skillPts }), h('div.sp'), 'AUSGERÜSTET: ', h('span.green', { text: eq.length + '/' + slots }))));
+    for (const id in SKILLS) {
+      const k = SKILLS[id], own = save.skills.owned.includes(id), on = eq.includes(id), lockLv = save.level < k.lvl;
+      let btn;
+      if (on) btn = h('button.btn.green.small', { tap: () => { sfx.back(); save.skills.eq = eq.filter(x => x !== id); persist(); this.renderTab(); } }, 'AKTIV');
+      else if (own) btn = h('button.btn.blue.small' + (eq.length >= slots ? '.dis' : ''), { tap: () => { sfx.ui(); save.skills.eq.push(id); persist(); this.renderTab(); } }, 'RÜSTEN');
+      else if (lockLv) btn = h('div.t7.dim', { style: 'width:70px;text-align:center;line-height:1.6', text: 'AB LV ' + k.lvl });
+      else btn = h('button.btn.gold.small' + (save.skillPts < k.cost ? '.dis' : ''), { tap: () => { save.skillPts -= k.cost; save.skills.owned.push(id); if (eq.length < slots) save.skills.eq.push(id); persist(); sfx.levelup(); this.renderTab(); this.refresh(); } }, k.cost + ' PKT');
+      s.append(h('div.card' + (on ? '.hl' : ''), { style: lockLv ? 'opacity:.5' : '' }, h('div.shopi', null, h('div.ic', null, ic(k.icon)), h('div', null, h('div.t9', { text: k.name }), h('div.t7.dim.lh', { style: 'margin-top:6px', text: k.desc })), btn)));
+    }
+  },
+  prestigeDlg() {
+    const n = (save.prestige || 0) + 1;
+    this.confirm('SCHULJAHR ' + (n + 1) + '?', 'Du startest wieder auf dem Schulhof. Deine Werte gehen zurück auf Stufe 1, aber du behältst Level, Münzen, Items, Style, Techniken und Pokale. Dafür: +6% Leben & Schaden für immer, +3 Technikpunkte, ' + (n <= 3 ? 'die Farbe ' + PRESTIGE_NAMES[n] + ' für deine Jacke, ' : '') + 'mehr Technik-Plätze und deutlich stärkere Gegner.', 'NEUES SCHULJAHR!', () => { doPrestige(); confetti(120); Music.stinger('promo'); this.toast('SCHULJAHR ' + (n + 1) + ' BEGINNT!', 'Abzeichen ' + pStars() + ' freigeschaltet.', 'crown'); this.hub('fight'); }, 'NOCH NICHT');
+  },
+  seasonEndDlg(se, cb) {
+    const lg = LEAGUES[se.tier];
+    const txt = { promo: 'AUFSTIEG!', relegate: 'ABSTIEG...', stay: 'SAISON VORBEI', champ: 'WELTMEISTER!' }[se.outcome];
+    const sub = { promo: 'Platz ' + se.rank + '! Nächste Saison spielst du in der ' + (LEAGUES[se.tier + 1] || lg).name + '.', relegate: 'Platz ' + se.rank + '. Du musst zurück in die ' + (LEAGUES[se.tier - 1] || lg).name + '. Trainiere und komm stärker zurück!', stay: 'Platz ' + se.rank + '. Du bleibst in der ' + lg.name + '. Die Gegner haben über den Sommer trainiert!', champ: 'Platz 1 in der WELTLIGA! Du bist der beste Schulhof-Kämpfer der Welt!' }[se.outcome];
+    if (se.outcome === 'promo' || se.outcome === 'champ') { Music.stinger('promo'); confetti(100); } else Music.stinger(se.outcome === 'relegate' ? 'lose' : 'win');
+    const close = this.open([se.outcome === 'champ' ? h('div', { style: 'text-align:center' }, ic('crown', 'width:60px;height:60px')) : null,
+      h('div.bigtitle', { style: 'color:' + (se.outcome === 'relegate' ? 'var(--red)' : 'var(--gold)'), text: txt }), h('div.sub', { text: sub }),
+      this.seasonTable(true),
+      h('div.t12', { style: 'text-align:center;margin:12px' }, 'SAISONPRÄMIE ', coinTxt(se.prize)),
+      se.outcome === 'champ' ? h('div.tipbox', null, 'Im Menü kannst du jetzt ein NEUES SCHULJAHR starten – mit dauerhaften Boni und stärkeren Gegnern.') : null,
+      h('button.btn.gold.wide.big', { style: 'margin-top:10px', tap: () => { Career.finishSeason(se); close(); cb(); } }, 'NEUE SAISON')]);
+  },
+});
+const _afterResult = UI.afterResult;
+UI.afterResult = function (d) {
+  if (pendingLevelUps.length) { const l = pendingLevelUps.shift(); return this.levelUp(l, () => this.afterResult(d)); }
+  if (d.seasonEnd) { const se = d.seasonEnd; d.seasonEnd = null; return this.seasonEndDlg(se, () => this.afterResult(d)); }
+  this.hub(d.kind === 'tutorial' ? 'fight' : this.tab);
+  if (d.kind === 'tutorial' && dailyAvailable()) setTimeout(() => this.daily(), 400);
+};
+const _levelUp = UI.levelUp;
+UI.levelUp = function (l, cb) { _levelUp.call(this, l, cb); const dlg = this.modal.lastElementChild && this.modal.lastElementChild.querySelector('.dlg'); if (dlg) dlg.insertBefore(h('div.t9.purple', { style: 'text-align:center;margin-bottom:12px', text: '+1 TECHNIKPUNKT' }), dlg.lastElementChild); };
+const _result = UI.result;
+UI.result = function (d) {
+  _result.call(this, d);
+  const g = d.res && d.res.statGains; if (!g) return;
+  const dlg = this.modal.lastElementChild && this.modal.lastElementChild.querySelector('.dlg'); if (!dlg) return;
+  const box = h('div.recs', { style: 'grid-template-columns:repeat(4,1fr);margin:4px 0 10px' }, ['kraft', 'ausdauer', 'tempo', 'technik'].map(st => h('div', { style: 'text-align:center' }, h('b.t9', { style: 'color:var(--blue)', text: '+' + g[st] }), STAT_LABEL[st].slice(0, 5))));
+  dlg.insertBefore(h('div.t7.dim', { style: 'margin-top:4px', text: 'ERFAHRUNG (EP)' }), dlg.lastElementChild);
+  dlg.insertBefore(box, dlg.lastElementChild);
+};
+const _codeDialog = UI.codeDialog;
+UI.codeDialog = function () {
+  const inp = h('input.name', { placeholder: 'SB-...', style: 'font-size:10px' });
+  const err = h('div.t7.red', { style: 'text-align:center;margin-top:8px;min-height:10px' });
+  const close = this.open([h('h2', { text: 'CODE EINGEBEN' }), h('div.sub', { text: 'Füge den Kämpfer-Code deines Freundes ein (beginnt mit SB-). Er kommt in deine Freundes-Liga.' }), inp, err,
+    h('button.btn.gold.wide', { style: 'margin-top:12px', tap: () => { const o = parseFighterCode(inp.value); if (!o) { sfx.error(); err.textContent = 'UNGÜLTIGER CODE'; return; } if (o.name === (save.name || '').replace(/[^A-Z0-9ÄÖÜ]/g, '').slice(0, 10) && inp.value.trim().toUpperCase() === myFighterCode()) { err.textContent = 'DAS IST DEIN EIGENER CODE'; return; } addFriend(o, inp.value.trim().toUpperCase()); close(); this.toast('FREUND HINZUGEFÜGT', o.name + ' ist jetzt in deiner Freundes-Liga.', 'user'); this.refresh(); this.prefight(o, 'HERAUSFORDERUNG', lo => Friend.start(o, lo)); } }, 'HINZUFÜGEN & KÄMPFEN'),
+    h('button.btn.dark.wide', { tap: () => { sfx.back(); close(); } }, 'ABBRECHEN')]);
+  setTimeout(() => { try { inp.focus(); } catch (e) { } }, 250);
+};
+const _tabProfile = UI.tabProfile;
+UI.tabProfile = function (s) {
+  _tabProfile.call(this, s);
+  const cards = [...s.querySelectorAll('.card')]; const fc = cards.find(c => c.querySelector('h3') && c.querySelector('h3').textContent === 'FREUNDE HERAUSFORDERN');
+  const rows = [{ me: true, name: save.name || 'DU', w: save.friends.reduce((a, f) => a + f.l, 0), l: save.friends.reduce((a, f) => a + f.w, 0), look: save.look }, ...save.friends].sort((a, b) => (b.w - b.l) - (a.w - a.l) || b.w - a.w);
+  const card = h('div.card', null, h('h3', { text: 'FREUNDES-LIGA' }),
+    save.friends.length ? null : h('div.t7.dim.lh', { text: 'Noch keine Freunde. Gib oben den Code eines Freundes ein – er erscheint dann hier mit eurer Bilanz.' }),
+    save.friends.length ? rows.map((r, i) => h('div.row', { style: `padding:6px;margin:4px 2px;background:${r.me ? '#1c2a18' : '#0e0e14'};box-shadow:0 0 0 2px #000` },
+      h('span.t8.gold', { style: 'width:22px', text: (i + 1) + '.' }), r.look ? h('img.px', { style: 'width:26px;height:24px', src: Doll.portrait(r.look).url }) : null,
+      h('div', { style: 'flex:1;min-width:0' }, h('div.t8', { text: r.name + (r.me ? ' (DU)' : '') }), h('div.t7.dim', { style: 'margin-top:4px', text: r.me ? 'DEINE BILANZ GEGEN FREUNDE: ' + r.l + ':' + r.w : 'DU GEGEN ' + r.name + ': ' + r.w + ':' + r.l })),
+      r.me ? null : h('button.btn.gold.small', { tap: () => { const o = parseFighterCode(r.code); if (!o) return; sfx.ui(); this.prefight(o, 'HERAUSFORDERUNG', lo => Friend.start(o, lo)); } }, ic('swords', 'width:16px;height:16px')))) : null);
+  if (fc) fc.after(card); else s.append(card);
+  // prestige stars in profile header
+  if (pStars()) { const nm = s.querySelector('.card.hl .t12'); if (nm) nm.textContent = (save.name || 'DU') + ' ' + pStars(); }
+};
+const _tabbar = UI.tabbar;
+UI.tabbar = function () {
+  const el = _tabbar.call(this);
+  const tr = el.children[1]; const dot = tr && tr.querySelector('.dot'); if (dot) dot.remove();
+  if (tr && this.tab !== 'train' && (trainLeft() > 0 || save.skillPts >= 2)) tr.append(h('div.dot'));
+  return el;
+};
+
+/* ═══════════════════════════════════════════════════════════════
    08 MAIN: game state, menu scene, input routing, fixed-step loop
    ═══════════════════════════════════════════════════════════════ */
 let t = 0;
@@ -3220,7 +3731,7 @@ const MenuScene = {
       chars.push({ x: -34, y: 0, look: save.look, dir: 'E', pose: aPose === 'hurt' && D.who === 1 ? 'hurt' : aPose, flip: false, sc: 2.3 });
       chars.push({ x: 34, y: 0, look: OPP_DEF[Math.floor(t / 900) % 5][5][2], dir: 'E', pose: bPose, flip: true, sc: 2.3 });
     } else if (view === 'fight') {
-      const o = Career.opp();
+      const o = Career.opp() || { look: save.look, boss: false };
       tz = 2.25; tx = 0; sy = H * 0.31;
       chars.push({ x: -36, y: 4, look, dir: 'E', pose: 'idle', ph: (t >> 5) & 1, flip: false, sc: 2.3 });
       chars.push({ x: 38, y: 4, look: o.look, dir: 'E', pose: 'idle', ph: ((t >> 5) + 1) & 1, flip: true, sc: o.boss ? 2.55 : 2.3, boss: o.boss });
