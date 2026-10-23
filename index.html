@@ -14,7 +14,7 @@
 :root{--bg:#0b0b10;--p1:#15151d;--p2:#1c1c27;--p3:#262634;--ln:#30303f;--ink:#f2efe6;--dim:#8f8ca0;--gold:#ffcf3a;--gold2:#e08a10;--red:#ff4a3d;--blue:#3fa9ff;--green:#4fdc6a;--purple:#b56cff;--orange:#ff8a1f;--cyan:#7ae8ff}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{width:100%;height:100%;background:#000;overflow:hidden;overscroll-behavior:none;font-family:'PS2P','Courier New',monospace;color:var(--ink);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:none}
-body{display:flex;align-items:center;justify-content:center}
+body{display:flex;align-items:center;justify-content:center;position:fixed;inset:0;overflow:hidden}
 #wrap{position:relative;width:min(100vw,calc(100dvh*0.62));height:100dvh;overflow:hidden;background:#000}
 @supports not (height:100dvh){#wrap{height:100vh;width:min(100vw,calc(100vh*0.62))}}
 #c{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges;touch-action:none}
@@ -3363,6 +3363,20 @@ function frame(now) {
 })();
 const _origBanners = Fight.drawBanners;
 Fight.drawBanners = function () { if (Game.mode === 'fight') _origBanners.call(this); };
+
+/* iOS Safari: stop page scroll/bounce/double-tap zoom while tapping fast */
+(function iosLock() {
+  const allowScroll = el => el && el.closest && el.closest('.scroll,.dlg,.chips');
+  document.addEventListener('touchmove', e => { if (!allowScroll(e.target)) e.preventDefault(); }, { passive: false });
+  ['touchstart', 'touchend', 'touchmove'].forEach(ev => cv.addEventListener(ev, e => e.preventDefault(), { passive: false }));
+  let lastEnd = 0;
+  document.addEventListener('touchend', e => { const n = Date.now(); if (n - lastEnd < 350 && !allowScroll(e.target) && e.target.tagName !== 'INPUT') e.preventDefault(); lastEnd = n; }, { passive: false });
+  document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+  document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
+  const fix = () => { if (window.scrollX || window.scrollY) window.scrollTo(0, 0); };
+  window.addEventListener('scroll', fix, { passive: true });
+  if (window.visualViewport) { window.visualViewport.addEventListener('resize', () => { fix(); resize(); }); window.visualViewport.addEventListener('scroll', fix); }
+})();
 
 </script>
 </body>
